@@ -18,21 +18,23 @@ pg_throwaway_require_tools
 #   3. source build under /tmp/postgresql-<server-version>/ (Homebrew's
 #      postgresql@17 does not ship it; see README for the one-time build)
 if [ -z "${PG_REGRESS_BIN:-}" ]; then
-  PGXS_MK="$(pg_config --pgxs)"
-  PGXS_SRC="$(cd "$(dirname "$PGXS_MK")/../.." && pwd)"
-  if [ -x "$PGXS_SRC/test/regress/pg_regress" ]; then
-    PG_REGRESS_BIN="$PGXS_SRC/test/regress/pg_regress"
-  else
-    _PG_VER="$(pg_config --version | awk '{print $2}')"
-    for _cand in "/tmp/postgresql-${_PG_VER}/src/test/regress/pg_regress" \
-                 /tmp/postgresql-*/src/test/regress/pg_regress; do
-      if [ -x "$_cand" ]; then
-        PG_REGRESS_BIN="$_cand"
-        break
-      fi
-    done
-    unset _cand _PG_VER
-  fi
+  PGXS_MK="$(pg_config --pgxs 2>/dev/null || true)"
+  _PG_VER="$(pg_config --version 2>/dev/null | awk '{print $2}' || true)"
+  for _cand in \
+    "$(dirname "$PGXS_MK" 2>/dev/null)/../test/regress/pg_regress" \
+    "$(pg_config --pkglibdir 2>/dev/null)/pgxs/src/test/regress/pg_regress" \
+    "$(pg_config --libdir 2>/dev/null)/pgxs/src/test/regress/pg_regress" \
+    "$(cd "$(dirname "$PGXS_MK" 2>/dev/null)/../.." 2>/dev/null && pwd)/src/test/regress/pg_regress" \
+    "$(cd "$(dirname "$PGXS_MK" 2>/dev/null)/../.." 2>/dev/null && pwd)/test/regress/pg_regress" \
+    "$(command -v pg_regress 2>/dev/null || true)" \
+    "/tmp/postgresql-${_PG_VER}/src/test/regress/pg_regress" \
+    /tmp/postgresql-*/src/test/regress/pg_regress; do
+    if [ -n "$_cand" ] && [ -x "$_cand" ]; then
+      PG_REGRESS_BIN="$_cand"
+      break
+    fi
+  done
+  unset _cand _PG_VER
 fi
 [ -x "${PG_REGRESS_BIN:-}" ] || {
   echo "error: pg_regress not found or not executable." >&2

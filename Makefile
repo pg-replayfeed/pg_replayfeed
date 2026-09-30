@@ -33,20 +33,27 @@ REGRESS_OPTS = --inputdir=test --outputdir=test/output
 # prune races were properties of the trigger/event-table design. The WAL
 # stream gets its ordering and atomicity from logical decoding itself.
 
+# Disable LLVM bitcode generation: logical decoding output plugins are pure C
+# shared libraries (.so / .dylib) loaded by walsender, not expression JIT modules.
+# When PostgreSQL is installed via distribution packages (e.g. Debian/Ubuntu/Homebrew),
+# the specific clang version hardcoded in Makefile.global (e.g. clang-19) is often
+# not installed, causing build failures.
+override with_llvm = no
+
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
+
+# Apple Clang does not support -fexcess-precision=standard (often present in
+# Homebrew PostgreSQL CFLAGS) and warns about it. With -Werror, this breaks compilation.
+ifeq ($(shell uname -s),Darwin)
+  override CFLAGS += -Wno-ignored-optimization-argument -Wno-unknown-warning-option
+endif
 
 # --- objects go to $(BUILDDIR)/, never next to the sources -------------------
 # More specific than PGXS's own `%.o : %.c` (shorter stem wins), so make picks
 # this rule for build/*.o. The recipe mirrors PGXS's compile line; CFLAGS and
 # CPPFLAGS already carry PGXS's -fPIC and server -I flags when it expands.
-# PGXS wants LLVM bitcode objects alongside the .o files (with_llvm builds).
-# Its stock pattern rule is "%.bc : %.c", which cannot reach src/*.c from
-# build/*.bc, so spell out the mapping for our layout.
-$(BUILDDIR)/%.bc : $(SRCDIR)/%.c | $(BUILDDIR)
-	$(COMPILE.c.bc) -o $@ $<
-
 $(BUILDDIR)/%.o: $(SRCDIR)/%.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
 

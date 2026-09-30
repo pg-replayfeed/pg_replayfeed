@@ -33,14 +33,14 @@ jobs:
           dev-files: true
 
       - name: Compile extension
-        run: make
+        run: make with_llvm=no
         env:
-          PG_CFLAGS: -DUSE_ASSERT_CHECKING -Wall -Wextra -Werror -Wno-unused-parameter -Wno-sign-compare ${{ matrix.postgres >= 18 && '-Wno-missing-field-initializers' || '' }}
+          PG_CFLAGS: -DUSE_ASSERT_CHECKING -Wall -Wextra -Werror -Wno-unused-parameter -Wno-sign-compare -Wno-unknown-warning-option -Wno-ignored-optimization-argument ${{ matrix.postgres >= 18 && '-Wno-missing-field-initializers' || '' }}
 
       - name: Install extension
         run: |
           export PG_CONFIG=`which pg_config`
-          sudo --preserve-env=PG_CONFIG make install
+          sudo --preserve-env=PG_CONFIG make install with_llvm=no
 
       - name: Run regression + isolation + upgrade tests
         run: bash test/run_tests.sh
@@ -53,6 +53,17 @@ jobs:
 
       - name: Run Go end-to-end tests (5 consumers)
         run: E2E_OPS=500 bash e2e/run_e2e.sh
+
+      - name: Test Go client library
+        run: cd client/go && go test -v ./...
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Test Node.js client library
+        run: cd client/nodejs && npm ci && npm test
 
       - name: Run modular benchmarks
         run: |
@@ -106,12 +117,12 @@ jobs:
           dev-files: true
 
       - name: Compile extension
-        run: make
+        run: make with_llvm=no
         env:
-          PG_CFLAGS: -DUSE_ASSERT_CHECKING -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unknown-warning-option
+          PG_CFLAGS: -DUSE_ASSERT_CHECKING -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unknown-warning-option -Wno-ignored-optimization-argument
 
       - name: Install extension
-        run: make install
+        run: make install with_llvm=no
 
       - name: Run regression + upgrade tests
         run: bash test/run_tests.sh
@@ -125,11 +136,14 @@ jobs:
       - name: Run Go end-to-end tests
         run: E2E_OPS=500 bash e2e/run_e2e.sh
 
+      - name: Test Go client library
+        run: cd client/go && go test -v ./...
+
       - name: Static analysis (scan-build)
         run: |
           make clean
           if command -v scan-build >/dev/null 2>&1; then
-            scan-build --status-bugs make
+            scan-build --status-bugs make with_llvm=no
           else
             echo "scan-build not found, skipping"
           fi
@@ -150,12 +164,12 @@ jobs:
           check-ub: yes
 
       - name: Compile
-        run: make OPTFLAGS=""
+        run: make OPTFLAGS="" with_llvm=no
         env:
-          PG_CFLAGS: -DUSE_ASSERT_CHECKING -Wall -Wextra -Werror -Wno-unused-parameter -Wno-sign-compare
+          PG_CFLAGS: -DUSE_ASSERT_CHECKING -Wall -Wextra -Werror -Wno-unused-parameter -Wno-sign-compare -Wno-unknown-warning-option -Wno-ignored-optimization-argument
 
       - name: Install
-        run: sudo --preserve-env=PG_CONFIG make install
+        run: sudo --preserve-env=PG_CONFIG make install with_llvm=no
 
       - name: Run test suite
         run: bash test/run_tests.sh
