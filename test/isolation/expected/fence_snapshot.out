@@ -1,0 +1,116 @@
+Parsed test spec with 3 sessions
+
+starting permutation: fence snapread winst cwin commitr replay_after_1
+step fence: SELECT replayfeed.fence('fs') AS f;
+f
+-
+1
+(1 row)
+
+step snapread: SELECT id, v FROM fs WHERE tenant = 'a' ORDER BY id;
+id| v
+--+--
+ 1|10
+(1 row)
+
+step winst: INSERT INTO fs VALUES (2, 'a', 20);
+step cwin: COMMIT;
+step commitr: COMMIT;
+step replay_after_1: SELECT cursor, entity_key, operation FROM replayfeed.events_after('fs', 'a', 1, 10) ORDER BY cursor;
+cursor|entity_key|operation
+------+----------+---------
+     2|         2|INSERT   
+(1 row)
+
+
+starting permutation: winst fence snapread cwin commitr replay_after_1
+step winst: INSERT INTO fs VALUES (2, 'a', 20);
+step fence: SELECT replayfeed.fence('fs') AS f;
+f
+-
+1
+(1 row)
+
+step snapread: SELECT id, v FROM fs WHERE tenant = 'a' ORDER BY id;
+id| v
+--+--
+ 1|10
+(1 row)
+
+step cwin: COMMIT;
+step commitr: COMMIT;
+step replay_after_1: SELECT cursor, entity_key, operation FROM replayfeed.events_after('fs', 'a', 1, 10) ORDER BY cursor;
+cursor|entity_key|operation
+------+----------+---------
+     2|         2|INSERT   
+(1 row)
+
+
+starting permutation: winst cwin fence snapread commitr replay_after_2
+step winst: INSERT INTO fs VALUES (2, 'a', 20);
+step cwin: COMMIT;
+step fence: SELECT replayfeed.fence('fs') AS f;
+f
+-
+2
+(1 row)
+
+step snapread: SELECT id, v FROM fs WHERE tenant = 'a' ORDER BY id;
+id| v
+--+--
+ 1|10
+ 2|20
+(2 rows)
+
+step commitr: COMMIT;
+step replay_after_2: SELECT cursor, entity_key, operation FROM replayfeed.events_after('fs', 'a', 2, 10) ORDER BY cursor;
+cursor|entity_key|operation
+------+----------+---------
+(0 rows)
+
+
+starting permutation: wdel fence snapread cdel commitr replay_after_1
+step wdel: DELETE FROM fs WHERE id = 1;
+step fence: SELECT replayfeed.fence('fs') AS f;
+f
+-
+1
+(1 row)
+
+step snapread: SELECT id, v FROM fs WHERE tenant = 'a' ORDER BY id;
+id| v
+--+--
+ 1|10
+(1 row)
+
+step cdel: COMMIT;
+step commitr: COMMIT;
+step replay_after_1: SELECT cursor, entity_key, operation FROM replayfeed.events_after('fs', 'a', 1, 10) ORDER BY cursor;
+cursor|entity_key|operation
+------+----------+---------
+     2|         1|DELETE   
+(1 row)
+
+
+starting permutation: fence snapread wdel cdel commitr replay_after_1
+step fence: SELECT replayfeed.fence('fs') AS f;
+f
+-
+1
+(1 row)
+
+step snapread: SELECT id, v FROM fs WHERE tenant = 'a' ORDER BY id;
+id| v
+--+--
+ 1|10
+(1 row)
+
+step wdel: DELETE FROM fs WHERE id = 1;
+step cdel: COMMIT;
+step commitr: COMMIT;
+step replay_after_1: SELECT cursor, entity_key, operation FROM replayfeed.events_after('fs', 'a', 1, 10) ORDER BY cursor;
+cursor|entity_key|operation
+------+----------+---------
+     2|         1|DELETE   
+(1 row)
+

@@ -1,0 +1,34 @@
+# build artifacts (see Makefile: objects live in build/, never next to sources)
+build/
+*.o
+*.so
+*.dylib
+*.bc
+
+# test outputs & logs
+test/output/
+test/isolation/output/
+test/isolation/tmp_instance/
+results/
+regression.diffs
+regression.out
+tmp_check/
+tmp_check_iso/
+log/
+output_iso/
+bench-results/
+
+# throwaway dev/bench instance dirs
+.devdb/
+
+# prometheus & grafana monitoring
+docker-compose*.yml
+grafana/
+prometheus/
+
+# editors & OS
+.DS_Store
+.vscode/
+.cache/
+.clangd/
+compile_commands.json

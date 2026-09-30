@@ -1,0 +1,95 @@
+-- security: privilege boundaries on feed administration, injection safety.
+-- pg_regress runs every suite in one database: reset to a clean slate even
+-- if the previous suite died midway. (Extension and tables go first so role
+-- grants depending on them vanish before the roles are dropped.)
+SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = 'rf_sec';
+ pg_drop_replication_slot 
+--------------------------
+(0 rows)
+
+DROP EXTENSION IF EXISTS pg_replayfeed CASCADE;
+DROP TABLE IF EXISTS sec CASCADE;
+NOTICE:  table "sec" does not exist, skipping
+DROP ROLE IF EXISTS app;
+NOTICE:  role "app" does not exist, skipping
+CREATE EXTENSION pg_replayfeed;
+SET client_min_messages = warning;
+-- Terse verbosity: ERROR output shows only the message, not the volatile
+-- DETAIL/CONTEXT (which embeds the commit LSN).
+\set VERBOSITY terse
+CREATE TABLE sec (
+    id     bigint PRIMARY KEY,
+    tenant text NOT NULL,
+    v      integer NOT NULL
+);
+SELECT replayfeed.create_feed('sec', 'sec', 'id', 'tenant');
+ create_feed 
+-------------
+           1
+(1 row)
+
+-- unprivileged role: grant EXECUTE first so we reach the *internal* invoker
+-- check instead of failing on the function ACL
+CREATE ROLE app NOSUPERUSER LOGIN;
+GRANT USAGE ON SCHEMA replayfeed TO app;
+GRANT EXECUTE ON FUNCTION replayfeed.create_feed(text, regclass, name, name) TO app;
+GRANT EXECUTE ON FUNCTION replayfeed.drop_feed(text) TO app;
+SET ROLE app;
+-- no TRIGGER on sec: the internal check denies and names the invoker (app),
+-- not the SECURITY DEFINER identity
+SELECT replayfeed.create_feed('evil', 'sec', 'id', 'tenant');
+ERROR:  pg_replayfeed: permission denied
+SELECT replayfeed.drop_feed('sec');
+ERROR:  pg_replayfeed: permission denied
+RESET ROLE;
+-- with TRIGGER privilege the invoker check passes; validation then fails
+-- honestly on the duplicate table (one feed per table)
+GRANT TRIGGER ON sec TO app;
+SET ROLE app;
+SELECT replayfeed.create_feed('evil', 'sec', 'id', 'tenant');
+ERROR:  pg_replayfeed: table already feeds "sec" (one feed per table)
+RESET ROLE;
+-- SET ROLE is honored: the check follows the role, not the session user
+REVOKE TRIGGER ON sec FROM app;
+SET ROLE app;
+SELECT replayfeed.drop_feed('sec');
+ERROR:  pg_replayfeed: permission denied
+RESET ROLE;
+-- injection attempt through the feed name: treated as data, never SQL.
+-- The lookup finds no such feed and reports it plainly.
+SELECT replayfeed.drop_feed('sec'' OR ''1''=''1');
+ERROR:  pg_replayfeed: feed "sec' OR '1'='1" does not exist
+-- hostile feed option value on the output plugin: not a known feed, so the
+-- stream is simply empty (options are matched literally, never evaluated)
+SELECT slot_name FROM pg_create_logical_replication_slot('rf_sec', 'pg_replayfeed');
+ slot_name 
+-----------
+ rf_sec
+(1 row)
+
+INSERT INTO sec VALUES (1, 'alice', 1);
+SELECT count(*) FROM pg_logical_slot_get_changes('rf_sec', NULL, NULL, 'feed', 'sec'' OR ''1''=''1');
+ERROR:  pg_replayfeed: feed "sec' OR '1'='1" does not exist
+SELECT count(*) FROM pg_logical_slot_get_changes('rf_sec', NULL, NULL, 'feed', 'sec');
+ count 
+-------
+     1
+(1 row)
+
+-- cleanup
+SELECT pg_drop_replication_slot('rf_sec');
+ pg_drop_replication_slot 
+--------------------------
+ 
+(1 row)
+
+REVOKE ALL ON SCHEMA replayfeed FROM app;
+DROP OWNED BY app;
+DROP ROLE app;
+SELECT replayfeed.drop_feed('sec');
+ drop_feed 
+-----------
+ 
+(1 row)
+
+DROP TABLE sec;

@@ -1,0 +1,141 @@
+#!/bin/bash
+# e2e/dev_feed.sh -- persistent dev instance + feed for the interactive demo.
+#
+#   bash e2e/dev_feed.sh up        ensure instance, db, table and feed exist
+#   bash e2e/dev_feed.sh down      stop the instance (data is kept)
+#   bash e2e/dev_feed.sh env-file  print the path of the generated env file
+#
+# Data lives in ${PG_REPLAYFEED_DEVDIR:-$HOME/.pg_replayfeed_dev}, so `make
+# producer` / `make consumer` restarts (and machine reboots) keep the feed
+# history. Port defaults to 55420 (the e2e throwaway uses 55419).
+set -euo pipefail
+
+DEVDIR="${PG_REPLAYFEED_DEVDIR:-$HOME/.pg_replayfeed_dev}"
+DEVPORT="${PG_REPLAYFEED_DEVPORT:-55420}"
+DEVDB=devdb
+DEVTABLE=dev_orders
+DEVFEED=dev
+DEVTENANT=acme
+
+dev_env_file() { echo "$DEVDIR/env.sh"; }
+
+dev_ensure() {
+  local root="$1"
+  source "$root/scripts/pg_throwaway.sh"
+  pg_throwaway_require_tools
+
+  local sock="$DEVDIR/sock"
+  mkdir -p "$sock"
+  if [ ! -f "$DEVDIR/data/PG_VERSION" ]; then
+    echo "dev_feed: initdb in $DEVDIR/data"
+    _tw_run_as_pg "export PATH=\"$PATH\"; initdb -D '$DEVDIR/data' -U postgres --no-locale -E UTF8 -A trust >/dev/null"
+  fi
+
+  # Ensure logical-decoding settings exist in postgresql.conf (new or upgraded cluster).
+  if ! grep -E -q '^[[:space:]]*wal_level[[:space:]]*=[[:space:]]*logical' "$DEVDIR/data/postgresql.conf" 2>/dev/null; then
+    _tw_run_as_pg "export PATH=\"$PATH\"; cat >> '$DEVDIR/data/postgresql.conf' <<'EOF'
+wal_level = logical
+max_wal_senders = 10
+max_replication_slots = 10
+listen_addresses = ''
+EOF"
+  fi
+
+  if ! _tw_run_as_pg "export PATH=\"$PATH\"; pg_ctl -D '$DEVDIR/data' status >/dev/null 2>&1"; then
+    echo "dev_feed: starting postgres (port $DEVPORT)"
+    if ! _tw_run_as_pg "export PATH=\"$PATH\"; pg_ctl -D '$DEVDIR/data' -o \"-k $sock -p $DEVPORT\" -l '$DEVDIR/log' start >/dev/null" 2>/dev/null; then
+      if grep -q 'unrecognized configuration parameter "output_plugin_libraries"' "$DEVDIR/log" 2>/dev/null; then
+        _tw_run_as_pg "export PATH=\"$PATH\"; sed -i.bak '/^output_plugin_libraries/d' '$DEVDIR/data/postgresql.conf'"
+        _tw_run_as_pg "export PATH=\"$PATH\"; pg_ctl -D '$DEVDIR/data' -o \"-k $sock -p $DEVPORT\" -l '$DEVDIR/log' start >/dev/null"
+      else
+        echo "dev_feed: pg_ctl failed; see $DEVDIR/log" >&2
+        return 1
+      fi
+    fi
+  fi
+  export PGHOST="$sock" PGPORT="$DEVPORT" PGUSER=postgres
+
+  # wal_level is a postmaster setting: if the running server doesn't have
+  # logical replication enabled, restart it so the config takes effect.
+  if [ "$(psql -d postgres -q -t -A -c "SHOW wal_level;")" != "logical" ]; then
+    echo "dev_feed: restarting postgres for wal_level=logical"
+    _tw_run_as_pg "export PATH=\"$PATH\"; pg_ctl -D '$DEVDIR/data' -o \"-k $sock -p $DEVPORT\" -l '$DEVDIR/log' restart >/dev/null" || {
+      echo "dev_feed: pg_ctl restart failed; see $DEVDIR/log" >&2
+      return 1
+    }
+    if [ "$(psql -d postgres -q -t -A -c "SHOW wal_level;")" != "logical" ]; then
+      echo "dev_feed: error: wal_level is still not logical after restart" >&2
+      return 1
+    fi
+  fi
+
+  if ! psql -d postgres -q -t -A -c "SELECT 1 FROM pg_database WHERE datname='$DEVDB';" | grep -q 1; then
+    psql -d postgres -q -c "CREATE DATABASE $DEVDB;"
+  fi
+
+  # Ensure the extension is 2.0. If an older 1.x version is present, drop and recreate
+  # because 2.0 is a complete WAL-native rewrite (1.x C symbols no longer exist).
+  local ext_ver
+  ext_ver="$(psql -d "$DEVDB" -q -t -A -c "SELECT extversion FROM pg_extension WHERE extname = 'pg_replayfeed';" 2>/dev/null || true)"
+  if [ -n "$ext_ver" ] && [ "$ext_ver" != "2.0" ]; then
+    echo "dev_feed: upgrading pg_replayfeed extension from $ext_ver to 2.0"
+    psql -d "$DEVDB" -q -c "DROP EXTENSION pg_replayfeed CASCADE; CREATE EXTENSION pg_replayfeed;"
+  else
+    psql -d "$DEVDB" -q -c "CREATE EXTENSION IF NOT EXISTS pg_replayfeed;"
+  fi
+
+  psql -d "$DEVDB" -q -c "CREATE TABLE IF NOT EXISTS $DEVTABLE(id bigint NOT NULL, tenant text NOT NULL, total integer, PRIMARY KEY(id));"
+  # Drop legacy 1.x triggers: 2.0 is WAL-native, no triggers. The old trigger
+  # references replayfeed.trigger_fn() which no longer exists.
+  psql -d "$DEVDB" -q <<SQL
+DO \$\$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT trigger_name FROM information_schema.triggers
+           WHERE event_object_table = '$DEVTABLE'
+             AND trigger_schema NOT IN ('pg_catalog', 'information_schema')
+  LOOP
+    EXECUTE format('DROP TRIGGER IF EXISTS %I ON $DEVTABLE', r.trigger_name);
+    RAISE NOTICE 'dropped legacy trigger % on $DEVTABLE', r.trigger_name;
+  END LOOP;
+END
+\$\$;
+SQL
+  if ! psql -d "$DEVDB" -q -t -A -c "SELECT 1 FROM replayfeed.feed WHERE name='$DEVFEED';" 2>/dev/null | grep -q 1; then
+    psql -d "$DEVDB" -q -c "SELECT replayfeed.create_feed('$DEVFEED', '$DEVTABLE', 'id', 'tenant');"
+  fi
+  psql -d "$DEVDB" -q -c "ALTER TABLE $DEVTABLE REPLICA IDENTITY FULL;"
+
+  cat >"$(dev_env_file)" <<EOF
+# Generated by e2e/dev_feed.sh; do not edit.
+export DEVDIR='$DEVDIR'
+export PGHOST='$sock'
+export PGPORT='$DEVPORT'
+export PGUSER='postgres'
+export DEVDB='$DEVDB'
+export DEVTABLE='$DEVTABLE'
+export DEVFEED='$DEVFEED'
+export DEVTENANT='$DEVTENANT'
+EOF
+  echo "dev_feed: ready -- db=$DEVDB table=$DEVTABLE feed=$DEVFEED tenant=$DEVTENANT (port $DEVPORT)"
+}
+
+dev_down() {
+  local root="$1"
+  source "$root/scripts/pg_throwaway.sh"
+  pg_throwaway_require_tools
+  if [ -f "$DEVDIR/data/PG_VERSION" ]; then
+    _tw_run_as_pg "export PATH=\"$PATH\"; pg_ctl -D '$DEVDIR/data' stop -m fast >/dev/null 2>&1" || true
+    echo "dev_feed: stopped (data kept in $DEVDIR)"
+  else
+    echo "dev_feed: no instance in $DEVDIR"
+  fi
+}
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+case "${1:-up}" in
+  up)       dev_ensure "$ROOT" ;;
+  down)     dev_down "$ROOT" ;;
+  env-file) dev_env_file ;;
+  *) echo "usage: dev_feed.sh [up|down|env-file]" >&2; exit 1 ;;
+esac

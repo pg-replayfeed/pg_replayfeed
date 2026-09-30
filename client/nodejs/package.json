@@ -1,0 +1,31 @@
+{
+  "name": "pg-replayfeed-client",
+  "version": "2.0.0",
+  "description": "PostgreSQL logical-decoding client for pg_replayfeed change envelopes",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "tsc && node --test dist/test/*.test.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "postgres",
+    "postgresql",
+    "logical-replication",
+    "pg_replayfeed",
+    "cdc",
+    "wal",
+    "streaming"
+  ],
+  "author": "",
+  "license": "PostgreSQL",
+  "dependencies": {
+    "pg": "^8.13.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.9",
+    "@types/pg": "^8.11.11",
+    "typescript": "^5.8.2"
+  }
+}

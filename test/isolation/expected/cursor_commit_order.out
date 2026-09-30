@@ -1,0 +1,48 @@
+Parsed test spec with 3 sessions
+
+starting permutation: w1 w2 c1 c2 read1 read2
+create_feed
+-----------
+          1
+(1 row)
+
+step w1: INSERT INTO co VALUES (1, 'a', 1);
+step w2: INSERT INTO co VALUES (2, 'a', 2); <waiting ...>
+step c1: COMMIT;
+step w2: <... completed>
+step c2: COMMIT;
+step read1: SELECT cursor, entity_key, operation FROM replayfeed.events_after('co', 'a', 0, 10) ORDER BY cursor;
+cursor|entity_key|operation
+------+----------+---------
+     1|         1|INSERT   
+     2|         2|INSERT   
+(2 rows)
+
+step read2: SELECT cursor, entity_key FROM replayfeed.events_after('co', 'a', 2, 10);
+cursor|entity_key
+------+----------
+(0 rows)
+
+
+starting permutation: w1 w2 a1 c2 read1 read2
+create_feed
+-----------
+          1
+(1 row)
+
+step w1: INSERT INTO co VALUES (1, 'a', 1);
+step w2: INSERT INTO co VALUES (2, 'a', 2); <waiting ...>
+step a1: ROLLBACK;
+step w2: <... completed>
+step c2: COMMIT;
+step read1: SELECT cursor, entity_key, operation FROM replayfeed.events_after('co', 'a', 0, 10) ORDER BY cursor;
+cursor|entity_key|operation
+------+----------+---------
+     1|         2|INSERT   
+(1 row)
+
+step read2: SELECT cursor, entity_key FROM replayfeed.events_after('co', 'a', 2, 10);
+cursor|entity_key
+------+----------
+(0 rows)
+

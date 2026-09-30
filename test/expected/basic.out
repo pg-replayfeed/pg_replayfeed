@@ -1,0 +1,153 @@
+-- basic: feed registration, WAL streaming of I/U/D, key change, tenant
+-- move, TRUNCATE, drop_feed. pg_replayfeed 2.0 is a logical-decoding output
+-- plugin: changes stream out of the WAL through replication slots.
+--
+-- The envelope carries a volatile commit LSN ("cursor") and wall-clock
+-- "committed_at_ms", so tests project the deterministic parts: the change
+-- and truncate arrays, plus boolean checks that cursor/timestamp are
+-- well-formed.
+--
+-- pg_regress runs every suite in one database: reset to a clean slate even
+-- if the previous suite died midway.
+SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = 'rf_basic';
+ pg_drop_replication_slot 
+--------------------------
+(0 rows)
+
+DROP EXTENSION IF EXISTS pg_replayfeed CASCADE;
+NOTICE:  extension "pg_replayfeed" does not exist, skipping
+DROP TABLE IF EXISTS orders, bad_nokey CASCADE;
+NOTICE:  table "orders" does not exist, skipping
+NOTICE:  table "bad_nokey" does not exist, skipping
+CREATE EXTENSION pg_replayfeed;
+SET client_min_messages = warning;
+CREATE TABLE orders (
+    order_id   bigint PRIMARY KEY,
+    account_id bigint NOT NULL,
+    amount     numeric NOT NULL,
+    status     text NOT NULL DEFAULT 'new'
+);
+-- deterministic projection of the stream
+CREATE FUNCTION stream_changes(slot text)
+RETURNS TABLE (cursor_ok boolean, ts_ok boolean, changes json, truncate json)
+LANGUAGE sql AS $$
+  SELECT (d->>'cursor') ~ '^[0-9A-F]+/[0-9A-F]+$',
+         (d->>'committed_at_ms')::bigint > 0,
+         d->'changes',
+         d->'truncate'
+    FROM (SELECT data::json AS d
+            FROM pg_logical_slot_get_changes(slot, NULL, NULL)) s;
+$$;
+-- registration rejections
+CREATE TABLE bad_nokey (id bigint, v text);
+SELECT replayfeed.create_feed('bad1', 'bad_nokey', 'id', NULL);
+ERROR:  pg_replayfeed: key column "id" must be NOT NULL
+SELECT replayfeed.create_feed('bad2', 'orders', 'nope', NULL);
+ERROR:  pg_replayfeed: key column "nope" does not exist
+CREATE VIEW v_orders AS SELECT * FROM orders;
+SELECT replayfeed.create_feed('bad3', 'v_orders', 'order_id', NULL);
+ERROR:  pg_replayfeed: source must be an ordinary table
+DETAIL:  relkind 'v' is not supported: views, foreign tables and partitioned tables are rejected.
+SELECT replayfeed.create_feed('bad4', 'orders', 'order_id', 'order_id');
+ERROR:  pg_replayfeed: tenant column must differ from key column
+SELECT replayfeed.create_feed('bad5', 'orders', 'amount', NULL);
+ERROR:  pg_replayfeed: key column "amount" must have a single-column unique index or primary key
+DETAIL:  The key identifies entities across the change stream.
+-- happy path
+SELECT replayfeed.create_feed('orders', 'orders', 'order_id', 'account_id');
+ create_feed 
+-------------
+           1
+(1 row)
+
+-- REPLICA IDENTITY FULL was set so old row images are logged
+SELECT relreplident FROM pg_class WHERE relname = 'orders';
+ relreplident 
+--------------
+ f
+(1 row)
+
+-- duplicate name / second feed on same table rejected
+SELECT replayfeed.create_feed('orders', 'orders', 'order_id', 'account_id');
+ERROR:  pg_replayfeed: feed "orders" already exists
+SELECT slot_name FROM pg_create_logical_replication_slot('rf_basic', 'pg_replayfeed');
+ slot_name 
+-----------
+ rf_basic
+(1 row)
+
+-- multi-row INSERT: one envelope, ordered changes
+INSERT INTO orders VALUES (1, 42, 100, 'new'), (2, 42, 200, 'new'), (3, 7, 50, 'new');
+SELECT * FROM stream_changes('rf_basic');
+ cursor_ok | ts_ok |                                                                          changes                                                                          | truncate 
+-----------+-------+-----------------------------------------------------------------------------------------------------------------------------------------------------------+----------
+ t         | t     | [{"feed":"orders","op":"I","key":"1","tenant":"42"},{"feed":"orders","op":"I","key":"2","tenant":"42"},{"feed":"orders","op":"I","key":"3","tenant":"7"}] | []
+(1 row)
+
+-- UPDATE and DELETE
+UPDATE orders SET status = 'paid' WHERE order_id = 1;
+DELETE FROM orders WHERE order_id = 2;
+SELECT * FROM stream_changes('rf_basic');
+ cursor_ok | ts_ok |                       changes                        | truncate 
+-----------+-------+------------------------------------------------------+----------
+ t         | t     | [{"feed":"orders","op":"U","key":"1","tenant":"42"}] | []
+ t         | t     | [{"feed":"orders","op":"D","key":"2","tenant":"42"}] | []
+(2 rows)
+
+-- no-op UPDATE emits nothing
+UPDATE orders SET status = 'paid' WHERE order_id = 1;
+SELECT count(*) FROM stream_changes('rf_basic');
+ count 
+-------
+     0
+(1 row)
+
+-- key change becomes DELETE(old) + INSERT(new)
+UPDATE orders SET order_id = 100 WHERE order_id = 1;
+SELECT * FROM stream_changes('rf_basic');
+ cursor_ok | ts_ok |                                                  changes                                                  | truncate 
+-----------+-------+-----------------------------------------------------------------------------------------------------------+----------
+ t         | t     | [{"feed":"orders","op":"D","key":"1","tenant":"42"},{"feed":"orders","op":"I","key":"100","tenant":"42"}] | []
+(1 row)
+
+-- tenant move carries old_tenant
+UPDATE orders SET account_id = 99 WHERE order_id = 3;
+SELECT * FROM stream_changes('rf_basic');
+ cursor_ok | ts_ok |                                changes                                | truncate 
+-----------+-------+-----------------------------------------------------------------------+----------
+ t         | t     | [{"feed":"orders","op":"U","key":"3","tenant":"99","old_tenant":"7"}] | []
+(1 row)
+
+-- TRUNCATE is a resnapshot marker, not row events
+TRUNCATE orders;
+SELECT * FROM stream_changes('rf_basic');
+ cursor_ok | ts_ok | changes |  truncate  
+-----------+-------+---------+------------
+ t         | t     | []      | ["orders"]
+(1 row)
+
+-- drop_feed: the table goes quiet
+SELECT replayfeed.drop_feed('orders');
+ drop_feed 
+-----------
+ 
+(1 row)
+
+INSERT INTO orders VALUES (9, 1, 10, 'new');
+SELECT count(*) FROM stream_changes('rf_basic');
+ count 
+-------
+     0
+(1 row)
+
+-- cleanup
+SELECT pg_drop_replication_slot('rf_basic');
+ pg_drop_replication_slot 
+--------------------------
+ 
+(1 row)
+
+DROP FUNCTION stream_changes(text);
+DROP VIEW v_orders;
+DROP TABLE orders;
+DROP TABLE bad_nokey;
